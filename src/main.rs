@@ -2,12 +2,17 @@ use wlambda;
 use wlambda::vval::VVal;
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::time::Duration;
 
 
 use futures::executor::block_on;
+use futures::StreamExt;
 
 use bluer::{
-    rfcomm::{Profile, Socket, SocketAddr, Stream},
+    AdapterEvent,
+    agent::Agent,
+    id::ServiceClass,
+    rfcomm::{Profile, Socket, SocketAddr, ReqError, Stream, Role},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -53,10 +58,93 @@ fn main() {
     bst.fun(
         "list", move |_env: &mut Env, _argc: usize| {
 //            let rt = tokio::runtime::Handle::current();
-            let sess = rt.block_on(bluer::Session::new()).unwrap();
-            // TODO: See: https://github.dev/bluez/bluer/tree/master/bluer
-            // TODO: And: https://docs.rs/bluer/0.13.3/bluer/struct.Session.html#method.new
-            println!("SESS: {:?}", sess);
+            rt.block_on(async {
+                let sess = bluer::Session::new().await.unwrap();
+                // TODO: See: https://github.dev/bluez/bluer/tree/master/bluer
+                // TODO: And: https://docs.rs/bluer/0.13.3/bluer/struct.Session.html#method.new
+                let adapters = sess.adapter_names().await.unwrap();
+                println!("Adapters: {:?}", adapters);
+                let adapter = sess.adapter(adapters.get(0).unwrap()).unwrap();
+
+                let addrs = adapter.device_addresses().await.unwrap();
+                println!("Devices: {:#?}", addrs);
+                let mut device = adapter.device(addrs[0]).unwrap();
+                println!("Device name: {:?}", device.name().await.unwrap());
+
+                let mut disco_events = adapter.discover_devices().await.unwrap();
+                let mut dev_addr = addrs[0];
+
+                while let Some(event) = disco_events.next().await {
+                    println!("EVENT: {:?}", event);
+                    match event {
+                        AdapterEvent::DeviceAdded(addr) => {
+                            let cur_device = adapter.device(addr).unwrap();
+                            let name = cur_device.name().await.unwrap();
+                            println!("Device name: {:?}", name);
+                            if let Some(name) = name {
+                                if name == "HC-05" {
+                                    device = cur_device;
+                                    dev_addr = addr;
+                                    break;
+                                }
+                            }
+                        },
+                        _ => { },
+                    }
+                }
+
+                let serial_uuid = ServiceClass::SerialPort.into();
+
+                let agent = Agent::default();
+                let _agent_hndl = sess.register_agent(agent).await.unwrap();
+
+                let profile = Profile {
+                    uuid:                   serial_uuid,
+                    name:                   Some("rfcat client".to_string()),
+                    role:                   Some(Role::Client),
+                    require_authentication: Some(false),
+                    require_authorization:  Some(false),
+                    auto_connect:           Some(true),
+                    ..Default::default()
+                };
+
+                let mut hndl = sess.register_profile(profile).await.unwrap();
+
+                let mut stream = loop {
+                    tokio::select! {
+                        res = async {
+                            let _ = device.connect().await;
+                            device.connect_profile(&serial_uuid).await
+                        } => {
+                            if let Err(err) = res {
+                                println!("Connect profile failed: {:?}", err);
+                            }
+
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                        },
+                        req = hndl.next() => {
+                            let req = req.unwrap();
+
+                            println!("Connect req (wait for {}): {:?}", dev_addr, req);
+                            if req.device() == dev_addr {
+                                break req.accept().unwrap();
+                                println!("ACCEPT!");
+                            } else {
+                                req.reject(ReqError::Rejected);
+                            }
+                        }
+                    }
+                };
+
+                println!("Connected Stream: {:?}", stream.peer_addr());
+                use tokio::io::AsyncWriteExt;
+                stream.write_all(b"#c22ffff c00ffff ceeffff L0009; %l03!").await.unwrap();
+
+
+            });
+
+
+
 //            let sock = Socket::new().unwrap();
 ////            let local_sa = 
 //            let ports = VVal::vec();
