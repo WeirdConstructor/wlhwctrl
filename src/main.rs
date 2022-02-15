@@ -15,7 +15,62 @@ use bluer::{
     rfcomm::{Profile, Socket, SocketAddr, ReqError, Stream, Role},
 };
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+//type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+struct BluetoothAdapter {
+    rt:      Rc<RefCell<tokio::runtime::Runtime>>,
+    session: bluer::Session,
+    adapter: bluer::Adapter,
+}
+
+impl BluetoothAdapter {
+    pub fn new(rt: Rc<RefCell<tokio::runtime::Runtime>>) -> Result<Self, bluer::Error> {
+        let session = rt.borrow_mut().block_on(async {
+            bluer::Session::new().await
+        })?;
+
+        let adapter = rt.borrow_mut().block_on(async {
+            let adapters = session.adapter_names().await?;
+            let adapter_name =
+                adapters.get(0)
+                    .ok_or_else(|| bluer::Error {
+                        kind: bluer::ErrorKind::NotFound,
+                        message: "No Adapters Found".to_string()
+                    })?;
+            session.adapter(adapter_name)
+        })?;
+
+        Ok(Self {
+            rt,
+            session,
+            adapter,
+        })
+    }
+
+//    pub fn discover_devices(&mut self, timeout: std::time::Duration) -> Vec<> {
+//                let mut disco_events = adapter.discover_devices().await.unwrap();
+//                let mut dev_addr = addrs[0];
+//
+//                while let Some(event) = disco_events.next().await {
+//                    println!("EVENT: {:?}", event);
+//                    match event {
+//                        AdapterEvent::DeviceAdded(addr) => {
+//                            let cur_device = adapter.device(addr).unwrap();
+//                            let name = cur_device.name().await.unwrap();
+//                            println!("Device name: {:?}", name);
+//                            if let Some(name) = name {
+//                                if name == "HC-05" {
+//                                    device = cur_device;
+//                                    dev_addr = addr;
+//                                    break;
+//                                }
+//                            }
+//                        },
+//                        _ => { },
+//                    }
+//                }
+//    }
+}
 
 //#[tokio::main(flavor = "current_thread")]
 fn main() {
@@ -138,24 +193,9 @@ fn main() {
 
                 println!("Connected Stream: {:?}", stream.peer_addr());
                 use tokio::io::AsyncWriteExt;
-                stream.write_all(b"#c22ffff c00ffff ceeffff L0009; %l03!").await.unwrap();
-
-
+                stream.write_all(b"#c22ffff c99ffff ceeffff L0009; %l03!").await.unwrap();
             });
 
-
-
-//            let sock = Socket::new().unwrap();
-////            let local_sa = 
-//            let ports = VVal::vec();
-//
-//            for port in serialport::available_ports().unwrap() {
-//                ports.push(VVal::map2(
-//                    "name", VVal::new_str_mv(port.port_name.clone()),
-//                    "type", VVal::None));
-//            }
-//
-//            Ok(ports)
             Ok(VVal::None)
         }, Some(0), Some(0), false);
 
