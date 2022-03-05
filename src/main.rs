@@ -1,4 +1,4 @@
-use wlambda;
+use wlambda::*;
 use wlambda::vval::VVal;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -19,19 +19,20 @@ use bluer::{
 
 //type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Debug, Clone)]
 struct BluetoothAdapter {
-    rt:      Rc<RefCell<tokio::runtime::Runtime>>,
+    rt:      tokio::runtime::Handle,
     session: bluer::Session,
     adapter: bluer::Adapter,
 }
 
 impl BluetoothAdapter {
-    pub fn new(rt: Rc<RefCell<tokio::runtime::Runtime>>) -> Result<Self, bluer::Error> {
-        let session = rt.borrow_mut().block_on(async {
+    pub fn new(rt: tokio::runtime::Handle) -> Result<Self, bluer::Error> {
+        let session = rt.block_on(async {
             bluer::Session::new().await
         })?;
 
-        let adapter = rt.borrow_mut().block_on(async {
+        let adapter = rt.block_on(async {
             let adapters = session.adapter_names().await?;
             let adapter_name =
                 adapters.get(0)
@@ -70,12 +71,14 @@ impl BluetoothAdapter {
         Ok(())
     }
 
-    pub fn discover_some_devices(&mut self, dur: std::time::Duration) -> Result<Vec<(String, bluer::Address)>, bluer::Error> {
+    pub fn discover_some_devices(&mut self, dur: std::time::Duration)
+        -> Result<Vec<(String, bluer::Address)>, bluer::Error>
+    {
         let mut devices = vec![];
 
         let rt = self.rt.clone();
 
-        rt.borrow_mut().block_on(async {
+        rt.block_on(async {
             match timeout(dur, self.discover_some_devices_impl(&mut devices)).await {
                 Ok(r) => r,
                 Err(_) => Ok(()),
@@ -86,6 +89,41 @@ impl BluetoothAdapter {
     }
 }
 
+#[derive(Debug, Clone)]
+struct VVBluetoothAdapter {
+    bta: Rc<RefCell<BluetoothAdapter>>,
+}
+
+impl VVBluetoothAdapter {
+    pub fn new(bta: BluetoothAdapter) -> Self {
+        Self { bta: Rc::new(RefCell::new(bta)) }
+    }
+
+    pub fn list(&self, dur: std::time::Duration) -> Result<VVal, bluer::Error> {
+        let adrs = self.bta.borrow_mut().discover_some_devices(dur)?;
+        let ret = VVal::vec();
+
+        for (name, addr) in adrs {
+            ret.push(VVal::map2(
+                "name", VVal::new_str_mv(name),
+                "addr", VVal::new_byt(addr.0.to_vec())));
+        }
+
+        Ok(ret)
+    }
+}
+
+impl VValUserData for VVBluetoothAdapter {
+    fn s(&self) -> String {
+        format!("$<BluetoothAdapter>")
+    }
+    fn as_any(&mut self) -> &mut dyn std::any::Any { self }
+    fn clone_ud(&self) -> Box<dyn VValUserData> {
+        Box::new(self.clone())
+    }
+}
+
+
 //#[tokio::main(flavor = "current_thread")]
 fn main() {
     let rt = Rc::new(RefCell::new(tokio::runtime::Builder::new_multi_thread()
@@ -94,7 +132,6 @@ fn main() {
         .build()
         .unwrap()));
 
-    use wlambda::{GlobalEnv, Env};
     let global_env = GlobalEnv::new_default();
 
     let argv = VVal::vec();
@@ -124,15 +161,67 @@ fn main() {
 
     let mut bst = wlambda::SymbolTable::new();
 
+/*
+
+# API Idee:
+
+!adapter = blue:adapter:new[];
+!list = blue:list adapter :s => 9;
+
+# - Check if new known device is available
+# - Spawn Thread for that device with a broker client handle:
+
+!port = blue:serial_port adapter address;
+
+!client = mqtt client;
+!address_chan = std:sync:mpsc:new[];
+
+std:thread:spawn $code{
+    loop {
+    ... port.read_some[]
+    ... port.read_timeout count duration
+        if chan.try_recv[] {
+            port.write $b"ieufwieufwehu";
+        };
+    }
+
+} ${ port = port, chan = address_chan };
+
+
+
+*/
     bst.fun(
-        "list", move |_env: &mut Env, _argc: usize| {
+        "new_adapter", move |_env: &mut Env, _argc: usize| {
+            let mut bta =
+                BluetoothAdapter::new(
+                    rt.borrow_mut().handle().clone()).unwrap();
+            Ok(VVal::new_usr(VVBluetoothAdapter::new(bta)))
+        }, Some(0), Some(0), false);
+
+    bst.fun(
+        "list", move |env: &mut Env, _argc: usize| {
 //            let rt = tokio::runtime::Handle::current();
-            let mut bta = BluetoothAdapter::new(rt.clone()).unwrap();
-            bta.discover_some_devices(Duration::from_secs(1));
-            println!("STOP");
-            bta.discover_some_devices(Duration::from_secs(1));
-            println!("STOP");
-            bta.discover_some_devices(Duration::from_secs(1));
+            let bta = env.arg(0);
+            let dur = env.arg(1).to_duration()?;
+
+            env.arg(0).with_usr_ref(|bta: &mut VVBluetoothAdapter| {
+                match bta.list(dur) {
+                    Err(e) =>
+                        Ok(env.new_err(
+                            format!("blue:list error: '{}'", e))),
+                    Ok(v) => Ok(v)
+                }
+            }).unwrap_or_else(||
+                Ok(env.new_err(
+                    format!("blue:list expects a $<BluetoothAdapter> as first argument, got: '{}'",
+                    env.arg(0).s()))))
+//            let mut bta = BluetoothAdapter::new(rt.borrow_mut().handle().clone()).unwrap();
+//            bta.discover_some_devices(Duration::from_secs(9));
+//            println!("STOP");
+//            bta.discover_some_devices(Duration::from_secs(9));
+//            println!("STOP");
+//            bta.discover_some_devices(Duration::from_secs(9));
+
 
 //                let sess = bluer::Session::new().await.unwrap();
 //                // TODO: See: https://github.dev/bluez/bluer/tree/master/bluer
@@ -215,9 +304,7 @@ fn main() {
 //                use tokio::io::AsyncWriteExt;
 //                stream.write_all(b"#c22ffff c99ffff ceeffff L0009; %l03!").await.unwrap();
 //            });
-
-            Ok(VVal::None)
-        }, Some(0), Some(0), false);
+        }, Some(2), Some(2), false);
 
     global_env.borrow_mut().set_module("serial", st);
     global_env.borrow_mut().set_module("blue", bst);
