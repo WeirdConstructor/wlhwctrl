@@ -4,6 +4,8 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::time::Duration;
 
+use std::sync::{Arc, Mutex};
+
 
 use futures::executor::block_on;
 use futures::Future;
@@ -111,6 +113,9 @@ impl VVBluetoothAdapter {
 
         Ok(ret)
     }
+
+//    pub fn spawn_client(&self, device: bluer::Address) -> Result<VVal, bluer::Error> {
+//    }
 }
 
 impl VValUserData for VVBluetoothAdapter {
@@ -120,6 +125,172 @@ impl VValUserData for VVBluetoothAdapter {
     fn as_any(&mut self) -> &mut dyn std::any::Any { self }
     fn clone_ud(&self) -> Box<dyn VValUserData> {
         Box::new(self.clone())
+    }
+}
+
+#[derive(Debug)]
+struct BluetoothSerialWriter {
+    rt:     tokio::runtime::Handle,
+    writer: bluer::rfcomm::stream::OwnedWriteHalf,
+}
+
+#[derive(Debug, Clone)]
+struct VVBluetoothSerialPort {
+    port: Arc<Mutex<BluetoothSerialWriter>>,
+}
+
+async fn create_stream(
+    bta:     &mut BluetoothAdapter,
+    address: bluer::Address) -> Result<bluer::rfcomm::Stream, bluer::Error>
+{
+    let sess = bluer::Session::new().await?;
+    // TODO: See: https://github.dev/bluez/bluer/tree/master/bluer
+    // TODO: And: https://docs.rs/bluer/0.13.3/bluer/struct.Session.html#method.new
+    let adapters = sess.adapter_names().await?;
+    println!("Adapters: {:?}", adapters);
+    let adapter = adapters.get(0).expect("Bluetooth Adapter 0 exists.");
+    let adapter = sess.adapter(adapter)?;
+
+//            let addrs = adapter.device_addresses().await?;
+//            println!("Devices: {:#?}", addrs);
+    let mut device = adapter.device(address)?;
+    println!("Device name: {:?}", device.name().await?);
+
+//            let mut disco_events = adapter.discover_devices().await?;
+    let mut dev_addr = address;
+
+    let serial_uuid = ServiceClass::SerialPort.into();
+
+    let agent = Agent::default();
+    let _agent_hndl = sess.register_agent(agent).await?;
+
+    let profile = Profile {
+        uuid:                   serial_uuid,
+        name:                   Some("rfcat client".to_string()),
+        role:                   Some(Role::Client),
+        require_authentication: Some(false),
+        require_authorization:  Some(false),
+        auto_connect:           Some(true),
+        ..Default::default()
+    };
+
+    let mut hndl = sess.register_profile(profile).await?;
+
+    let mut stream = loop {
+        tokio::select! {
+            res = async {
+                let _ = device.connect().await;
+                device.connect_profile(&serial_uuid).await
+            } => {
+                if let Err(err) = res {
+                    println!("Connect profile failed: {:?}", err);
+                }
+
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            },
+            req = hndl.next() => {
+                let req = req.unwrap();
+
+                println!("Connect req (wait for {}): {:?}", dev_addr, req);
+                if req.device() == dev_addr {
+                    break req.accept();
+                    println!("ACCEPT!");
+                } else {
+                    req.reject(ReqError::Rejected);
+                }
+            }
+        }
+    };
+
+    stream
+
+//    println!("Connected Stream: {:?}", stream.peer_addr());
+//    use tokio::io::AsyncWriteExt;
+//    stream.write_all(b"#c22ffff c99ffff ceeffff L0009; %l03!").await.unwrap();
+}
+
+impl VVBluetoothSerialPort {
+    pub fn spawn(
+        bta:     &mut BluetoothAdapter,
+        mut rt:  tokio::runtime::Handle,
+        address: bluer::Address) -> Result<Self, bluer::Error>
+    {
+        let stream : bluer::rfcomm::Stream =
+            rt.block_on(create_stream(bta, address))?;
+
+        let (reader, writer) = stream.into_split();
+
+        Ok(VVBluetoothSerialPort {
+            port: Arc::new(Mutex::new(BluetoothSerialWriter {
+                rt,
+                writer,
+            })),
+        })
+    }
+}
+
+impl VValUserData for VVBluetoothSerialPort {
+    fn s(&self) -> String {
+        format!("$<BluetoothSerialPort>")
+    }
+    fn as_any(&mut self) -> &mut dyn std::any::Any { self }
+    fn clone_ud(&self) -> Box<dyn VValUserData> {
+        Box::new(self.clone())
+    }
+    fn as_thread_safe_usr(&mut self) -> Option<Box<dyn wlambda::threads::ThreadSafeUsr>> {
+        Some(Box::new(self.clone()))
+    }
+
+    fn call_method(&self, key: &str, env: &mut Env) -> Result<VVal, StackAction> {
+        let argv = env.argv_ref();
+        match key {
+//            "subscribe" => {
+//                if argv.len() != 1 {
+//                    return
+//                        Err(StackAction::panic_str(
+//                            "subscribe method expects 1 argument".to_string(),
+//                            None,
+//                            env.argv()))
+//                }
+//
+//                let ret = argv[0].with_s_ref(|s| self.subscribe(s));
+//                match ret {
+//                    Ok(_)  => Ok(VVal::Bol(true)),
+//                    Err(e) => Ok(env.new_err(format!("subscribe error: {}", e)))
+//                }
+//            },
+//            "publish" => {
+//                if argv.len() != 2 {
+//                    return
+//                        Err(StackAction::panic_str(
+//                            "publish method expects 2 argument".to_string(),
+//                            None,
+//                            env.argv()))
+//                }
+//
+//                let ret =
+//                    argv[0].with_s_ref(|topic|
+//                        argv[1].with_bv_ref(|payload|
+//                            self.publish(topic, payload)));
+//                match ret {
+//                    Ok(_)  => Ok(VVal::Bol(true)),
+//                    Err(e) => Ok(env.new_err(format!("publish error: {}", e)))
+//                }
+//            },
+            _ => {
+                Err(StackAction::panic_str(
+                    format!("unknown method called: {}", key),
+                    None,
+                    env.argv()))
+            },
+        }
+    }
+
+}
+
+impl wlambda::threads::ThreadSafeUsr for VVBluetoothSerialPort {
+    fn to_vval(&self) -> VVal {
+        VVal::Usr(Box::new(self.clone()))
     }
 }
 
@@ -171,10 +342,10 @@ fn main() {
 # - Check if new known device is available
 # - Spawn Thread for that device with a broker client handle:
 
-!port = blue:serial_port adapter address;
+!recv_data_chan = std:sync:mpsc:new[];
+!port = blue:serial_port adapter address recv_data_chan;
 
 !client = mqtt client;
-!address_chan = std:sync:mpsc:new[];
 
 std:thread:spawn $code{
     loop {
@@ -185,7 +356,7 @@ std:thread:spawn $code{
         };
     }
 
-} ${ port = port, chan = address_chan };
+} ${ port = port, chan = recv_data_chan };
 
 
 
@@ -215,6 +386,27 @@ std:thread:spawn $code{
                 Ok(env.new_err(
                     format!("blue:list expects a $<BluetoothAdapter> as first argument, got: '{}'",
                     env.arg(0).s()))))
+        }, Some(2), Some(2), false);
+
+    bst.fun(
+        "spawn_client", move |env: &mut Env, _argc: usize| {
+//            let rt = tokio::runtime::Handle::current();
+            let bta = env.arg(0);
+            let dur = env.arg(1).to_duration()?;
+
+            env.arg(0).with_usr_ref(|bta: &mut VVBluetoothAdapter| {
+                match bta.list(dur) {
+                    Err(e) =>
+                        Ok(env.new_err(
+                            format!("blue:list error: '{}'", e))),
+                    Ok(v) => Ok(v)
+                }
+            }).unwrap_or_else(||
+                Ok(env.new_err(
+                    format!("blue:list expects a $<BluetoothAdapter> as first argument, got: '{}'",
+                    env.arg(0).s()))))
+        }, Some(2), Some(2), false);
+
 //            let mut bta = BluetoothAdapter::new(rt.borrow_mut().handle().clone()).unwrap();
 //            bta.discover_some_devices(Duration::from_secs(9));
 //            println!("STOP");
@@ -304,7 +496,6 @@ std:thread:spawn $code{
 //                use tokio::io::AsyncWriteExt;
 //                stream.write_all(b"#c22ffff c99ffff ceeffff L0009; %l03!").await.unwrap();
 //            });
-        }, Some(2), Some(2), false);
 
     global_env.borrow_mut().set_module("serial", st);
     global_env.borrow_mut().set_module("blue", bst);
