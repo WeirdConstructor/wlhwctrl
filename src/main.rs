@@ -89,6 +89,13 @@ impl BluetoothAdapter {
 
         Ok(devices)
     }
+
+    pub fn spawn_client(&mut self,
+        address: bluer::Address) -> Result<VVBluetoothSerialPort, bluer::Error>
+    {
+        let mut rt = self.rt.clone();
+        VVBluetoothSerialPort::spawn(self, rt, address)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,8 +121,9 @@ impl VVBluetoothAdapter {
         Ok(ret)
     }
 
-//    pub fn spawn_client(&self, device: bluer::Address) -> Result<VVal, bluer::Error> {
-//    }
+    pub fn spawn_client(&self, device: bluer::Address) -> Result<VVal, bluer::Error> {
+        Ok(VVal::new_usr(self.bta.borrow_mut().spawn_client(device)?))
+    }
 }
 
 impl VValUserData for VVBluetoothAdapter {
@@ -134,6 +142,17 @@ struct BluetoothSerialWriter {
     writer: bluer::rfcomm::stream::OwnedWriteHalf,
 }
 
+impl BluetoothSerialWriter {
+    pub fn write(&mut self, buf: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+
+        self.rt.block_on(async {
+
+            self.writer.write_all(buf).await.unwrap();
+        });
+    }
+}
+
 #[derive(Debug, Clone)]
 struct VVBluetoothSerialPort {
     port: Arc<Mutex<BluetoothSerialWriter>>,
@@ -143,17 +162,7 @@ async fn create_stream(
     bta:     &mut BluetoothAdapter,
     address: bluer::Address) -> Result<bluer::rfcomm::Stream, bluer::Error>
 {
-    let sess = bluer::Session::new().await?;
-    // TODO: See: https://github.dev/bluez/bluer/tree/master/bluer
-    // TODO: And: https://docs.rs/bluer/0.13.3/bluer/struct.Session.html#method.new
-    let adapters = sess.adapter_names().await?;
-    println!("Adapters: {:?}", adapters);
-    let adapter = adapters.get(0).expect("Bluetooth Adapter 0 exists.");
-    let adapter = sess.adapter(adapter)?;
-
-//            let addrs = adapter.device_addresses().await?;
-//            println!("Devices: {:#?}", addrs);
-    let mut device = adapter.device(address)?;
+    let mut device = bta.adapter.device(address)?;
     println!("Device name: {:?}", device.name().await?);
 
 //            let mut disco_events = adapter.discover_devices().await?;
@@ -162,7 +171,7 @@ async fn create_stream(
     let serial_uuid = ServiceClass::SerialPort.into();
 
     let agent = Agent::default();
-    let _agent_hndl = sess.register_agent(agent).await?;
+    let _agent_hndl = bta.session.register_agent(agent).await?;
 
     let profile = Profile {
         uuid:                   serial_uuid,
@@ -174,7 +183,7 @@ async fn create_stream(
         ..Default::default()
     };
 
-    let mut hndl = sess.register_profile(profile).await?;
+    let mut hndl = bta.session.register_profile(profile).await?;
 
     let mut stream = loop {
         tokio::select! {
@@ -218,7 +227,32 @@ impl VVBluetoothSerialPort {
         let stream : bluer::rfcomm::Stream =
             rt.block_on(create_stream(bta, address))?;
 
-        let (reader, writer) = stream.into_split();
+        let (mut reader, writer) = stream.into_split();
+
+        let t_rt = rt.clone();
+
+        std::thread::spawn(move || {
+            use tokio::io::AsyncReadExt;
+
+            t_rt.block_on(async {
+                loop {
+                    let mut buf = [0u8; 256];
+
+                    match reader.read(&mut buf[..]).await {
+                        Err(e) => {
+                            // Send error!
+                            println!("READ ERR: {}", e);
+                        },
+                        Ok(len) => {
+                            let s = std::str::from_utf8(&buf[0..len]).unwrap();
+                            println!("Read: '{:?}'", s);
+                        },
+                    }
+
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        });
 
         Ok(VVBluetoothSerialPort {
             port: Arc::new(Mutex::new(BluetoothSerialWriter {
@@ -244,6 +278,22 @@ impl VValUserData for VVBluetoothSerialPort {
     fn call_method(&self, key: &str, env: &mut Env) -> Result<VVal, StackAction> {
         let argv = env.argv_ref();
         match key {
+            "send" => {
+                if argv.len() != 1 {
+                    return
+                        Err(StackAction::panic_str(
+                            "send method expects 1 argument".to_string(),
+                            None,
+                            env.argv()))
+                }
+
+                if let Ok(mut port) = self.port.lock() {
+                    argv[0].with_bv_ref(|data|
+                        port.write(data));
+                }
+
+                Ok(VVal::None)
+            },
 //            "subscribe" => {
 //                if argv.len() != 1 {
 //                    return
@@ -389,21 +439,27 @@ std:thread:spawn $code{
         }, Some(2), Some(2), false);
 
     bst.fun(
-        "spawn_client", move |env: &mut Env, _argc: usize| {
+        "spawn_port_for_address", move |env: &mut Env, _argc: usize| {
 //            let rt = tokio::runtime::Handle::current();
-            let bta = env.arg(0);
-            let dur = env.arg(1).to_duration()?;
+            let bta  = env.arg(0);
+            let addr = env.arg(1).as_bytes();
+            if addr.len() != 6 {
+                return Ok(env.new_err(
+                    format!("blue:spawn_port_for_address address argument needs to be 6 bytes long, got: '{}'",
+                    env.arg(1).s())));
+            }
 
+            let addr = bluer::Address::new(addr[0..6].try_into().unwrap());
             env.arg(0).with_usr_ref(|bta: &mut VVBluetoothAdapter| {
-                match bta.list(dur) {
+                match bta.spawn_client(addr) {
                     Err(e) =>
                         Ok(env.new_err(
-                            format!("blue:list error: '{}'", e))),
+                            format!("blue:spawn_port_for_address error: '{}'", e))),
                     Ok(v) => Ok(v)
                 }
             }).unwrap_or_else(||
                 Ok(env.new_err(
-                    format!("blue:list expects a $<BluetoothAdapter> as first argument, got: '{}'",
+                    format!("blue:spawn_port_for_address expects a $<BluetoothAdapter> as first argument, got: '{}'",
                     env.arg(0).s()))))
         }, Some(2), Some(2), false);
 
