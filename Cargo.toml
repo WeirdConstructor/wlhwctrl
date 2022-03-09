@@ -7,7 +7,7 @@ authors = ["Weird Concstructor <weirdconstructor@gmail.com>"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-wlambda = { path = "../wlambda", features = ["reqwest"] }
+wlambda = { path = "../wlambda", features = ["all"] }
 serialport = "4.0.1"
 bluer = { version = "0.13.3", features = ["rfcomm"] }
 futures = "0.3.21"

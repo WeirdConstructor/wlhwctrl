@@ -244,8 +244,9 @@ impl VVBluetoothSerialPort {
                             println!("READ ERR: {}", e);
                         },
                         Ok(len) => {
-                            let s = std::str::from_utf8(&buf[0..len]).unwrap();
-                            println!("Read: '{:?}'", s);
+                            if let Ok(s) = std::str::from_utf8(&buf[0..len]) {
+                                println!("Read: '{:?}'", s);
+                            }
                         },
                     }
 
