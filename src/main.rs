@@ -1,5 +1,6 @@
 use wlambda::*;
 use wlambda::vval::VVal;
+use wlambda::threads::AValChannel;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::time::Duration;
@@ -91,10 +92,12 @@ impl BluetoothAdapter {
     }
 
     pub fn spawn_client(&mut self,
-        address: bluer::Address) -> Result<VVBluetoothSerialPort, bluer::Error>
+        address: bluer::Address,
+        recv_chan: Option<AValChannel>)
+        -> Result<VVBluetoothSerialPort, bluer::Error>
     {
         let mut rt = self.rt.clone();
-        VVBluetoothSerialPort::spawn(self, rt, address)
+        VVBluetoothSerialPort::spawn(self, rt, address, recv_chan)
     }
 }
 
@@ -121,8 +124,13 @@ impl VVBluetoothAdapter {
         Ok(ret)
     }
 
-    pub fn spawn_client(&self, device: bluer::Address) -> Result<VVal, bluer::Error> {
-        Ok(VVal::new_usr(self.bta.borrow_mut().spawn_client(device)?))
+    pub fn spawn_client(&self,
+        device: bluer::Address,
+        recv_chan: Option<AValChannel>)
+        -> Result<VVal, bluer::Error>
+    {
+        Ok(VVal::new_usr(
+            self.bta.borrow_mut().spawn_client(device, recv_chan)?))
     }
 }
 
@@ -147,7 +155,6 @@ impl BluetoothSerialWriter {
         use tokio::io::AsyncWriteExt;
 
         self.rt.block_on(async {
-
             self.writer.write_all(buf).await.unwrap();
         });
     }
@@ -220,9 +227,10 @@ async fn create_stream(
 
 impl VVBluetoothSerialPort {
     pub fn spawn(
-        bta:     &mut BluetoothAdapter,
-        mut rt:  tokio::runtime::Handle,
-        address: bluer::Address) -> Result<Self, bluer::Error>
+        bta:       &mut BluetoothAdapter,
+        rt:        tokio::runtime::Handle,
+        address:   bluer::Address,
+        recv_chan: Option<AValChannel>) -> Result<Self, bluer::Error>
     {
         let stream : bluer::rfcomm::Stream =
             rt.block_on(create_stream(bta, address))?;
@@ -246,6 +254,13 @@ impl VVBluetoothSerialPort {
                         Ok(len) => {
                             if let Ok(s) = std::str::from_utf8(&buf[0..len]) {
                                 println!("Read: '{:?}'", s);
+                                if let Some(chan) = &recv_chan {
+                                    chan.send(
+                                        &VVal::vec3(
+                                            VVal::new_sym("bt_data"),
+                                            VVal::new_byt(address.to_vec()),
+                                            VVal::new_str(s)));
+                                }
                             }
                         },
                     }
@@ -450,9 +465,38 @@ std:thread:spawn $code{
                     env.arg(1).s())));
             }
 
+            let chan =
+                if env.arg(2).is_some() {
+                    let mut chan = env.arg(2);
+                    let chan =
+                        chan.with_usr_ref(|chan: &mut AValChannel| {
+                            chan.fork_sender_direct()
+                        });
+
+                    if let Some(chan) = chan {
+                       match chan {
+                            Ok(chan) => Some(chan),
+                            Err(err) => {
+                                return
+                                    Ok(VVal::err_msg(
+                                        &format!("Failed to fork sender, \
+                                                  can't get lock: {}", err)));
+                            }
+                       }
+                    } else {
+                        return
+                            Ok(env.new_err(format!(
+                                "bta:spawn_port_for_address: \
+                                 channel not a std:sync:mpsc handle! {}",
+                                env.arg(2).s())));
+                    }
+                } else {
+                    None
+                };
+
             let addr = bluer::Address::new(addr[0..6].try_into().unwrap());
             env.arg(0).with_usr_ref(|bta: &mut VVBluetoothAdapter| {
-                match bta.spawn_client(addr) {
+                match bta.spawn_client(addr, chan) {
                     Err(e) =>
                         Ok(env.new_err(
                             format!("blue:spawn_port_for_address error: '{}'", e))),
@@ -462,7 +506,7 @@ std:thread:spawn $code{
                 Ok(env.new_err(
                     format!("blue:spawn_port_for_address expects a $<BluetoothAdapter> as first argument, got: '{}'",
                     env.arg(0).s()))))
-        }, Some(2), Some(2), false);
+        }, Some(2), Some(3), false);
 
 //            let mut bta = BluetoothAdapter::new(rt.borrow_mut().handle().clone()).unwrap();
 //            bta.discover_some_devices(Duration::from_secs(9));
