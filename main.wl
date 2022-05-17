@@ -37,9 +37,16 @@ std:displayln ~ port;
         };
 };
 
+!last_update_time = std:time:now[:ms] - 5000;
+
 while $t {
-    std:displayln "SEND:" cmd;
-    port.send cmd;
+    !now_ms = std:time:now :ms;
+    if (now_ms - last_update_time) >= 5000 {
+        std:displayln "SEND:" cmd;
+        .last_update_time = now_ms;
+        port.send cmd;
+    };
+
     !recv = $t;
     while recv {
         .recv = $f;
@@ -54,6 +61,6 @@ while $t {
             .recv = $t;
         };
     };
-    std:thread:sleep :s => 5;
+    std:thread:sleep :ms => 100;
 };
 
