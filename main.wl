@@ -10,8 +10,14 @@
 #std:displayln ~ blue:list bta :s => 4;
 
 !addr = $b"\x98\xD3q\xF6\x11\x0E";
-!port = blue:spawn_port_for_address bta addr chan;
+!port = $n;# blue:spawn_port_for_address bta addr chan;
 std:displayln ~ port;
+
+!reconnect = {
+    .port = blue:spawn_port_for_address bta addr chan;
+};
+
+reconnect[];
 
 #!cmd = $b"#c22ffff c99ffff ceeffff L0009; %l03!";
 !cmd = $b"#c22ffff L0009; +0000!";
@@ -19,11 +25,9 @@ std:displayln ~ port;
 !handle_frontend_command = {!(path, data) = @;
     match data
         $["one_color", x] => {
-            std:displayln :XXXXXXXXXXXXXXXXX $\.x;
             !color = $\.x $p(1, -1);
             .color = std:v:hex2rgba_f color;
             .color = std:v:rgb2hsv color;
-            std:displayln "HVV:" color;
             .color =
                 std:str:to_lowercase ~
                     std:bytes:to_hex ~
@@ -31,9 +35,13 @@ std:displayln ~ port;
                             (byte color.1 * 255.0)
                             (byte color.2 * 255.0);
             .color = "c" color;
-            std:displayln "OUTCOL:" color;
+
             .cmd = std:str:to_bytes ~ "#" color " L0009; +0000!";
-            port.send cmd;
+            std:displayln ">" cmd;
+            on_error {||
+                std:displayln "ER:" @;
+                reconnect[];
+            } ~ port.send cmd;
         };
 };
 
@@ -44,7 +52,10 @@ while $t {
     if (now_ms - last_update_time) >= 5000 {
         std:displayln "SEND:" cmd;
         .last_update_time = now_ms;
-        port.send cmd;
+        on_error {||
+            std:displayln "ER:" @;
+            reconnect[];
+        } ~ port.send cmd;
     };
 
     !recv = $t;

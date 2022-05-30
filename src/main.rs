@@ -146,17 +146,25 @@ impl VValUserData for VVBluetoothAdapter {
 
 #[derive(Debug)]
 struct BluetoothSerialWriter {
-    rt:     tokio::runtime::Handle,
-    writer: bluer::rfcomm::stream::OwnedWriteHalf,
+    rt:       tokio::runtime::Handle,
+    writer:   bluer::rfcomm::stream::OwnedWriteHalf,
 }
 
 impl BluetoothSerialWriter {
-    pub fn write(&mut self, buf: &[u8]) {
+    pub fn write(&mut self, buf: &[u8]) -> bool {
         use tokio::io::AsyncWriteExt;
 
+        let mut res = false;
+
         self.rt.block_on(async {
-            self.writer.write_all(buf).await.unwrap();
+            if let Err(e) = self.writer.write_all(buf).await {
+                println!("Error: {}", e);
+            } else {
+                res = true;
+            }
         });
+
+        res
     }
 }
 
@@ -250,16 +258,28 @@ impl VVBluetoothSerialPort {
                         Err(e) => {
                             // Send error!
                             println!("READ ERR: {}", e);
+                            if let Some(chan) = &recv_chan {
+                                chan.send(
+                                    &VVal::vec3(
+                                        VVal::new_sym("bt_err"),
+                                        VVal::new_byt(address.to_vec()),
+                                        VVal::new_str_mv(format!("{}", e))));
+                            }
                         },
                         Ok(len) => {
                             if let Ok(s) = std::str::from_utf8(&buf[0..len]) {
                                 println!("Read: '{:?}'", s);
-                                if let Some(chan) = &recv_chan {
-                                    chan.send(
-                                        &VVal::vec3(
-                                            VVal::new_sym("bt_data"),
-                                            VVal::new_byt(address.to_vec()),
-                                            VVal::new_str(s)));
+                                if len == 0 {
+                                    println!("Ending reader, got len=0, {}", address);
+                                    break;
+                                } else {
+                                    if let Some(chan) = &recv_chan {
+                                        chan.send(
+                                            &VVal::vec3(
+                                                VVal::new_sym("bt_data"),
+                                                VVal::new_byt(address.to_vec()),
+                                                VVal::new_str(s)));
+                                    }
                                 }
                             }
                         },
@@ -304,8 +324,12 @@ impl VValUserData for VVBluetoothSerialPort {
                 }
 
                 if let Ok(mut port) = self.port.lock() {
-                    argv[0].with_bv_ref(|data|
-                        port.write(data));
+                    let res =
+                        argv[0].with_bv_ref(|data|
+                            port.write(data));
+                    if !res {
+                        return Ok(env.new_err(format!("send error!")));
+                    }
                 }
 
                 Ok(VVal::None)
