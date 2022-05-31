@@ -22,19 +22,47 @@ reconnect[];
 #!cmd = $b"#c22ffff c99ffff ceeffff L0009; %l03!";
 !cmd = $b"#c22ffff L0009; +0000!";
 
+!color2cmd = {!(color) = @;
+#    std:displayln "III" color;
+    .color = std:v:hex2rgba_f color;
+#    std:displayln "IIA" color;
+    .color = std:v:rgb2hsv color;
+#    std:displayln "IIB" color;
+    .color =
+        std:str:to_lowercase ~
+            std:bytes:to_hex ~
+                (byte (color.0 / 360.0) * 255.0)
+                    (byte color.1 * 255.0)
+                    (byte color.2 * 255.0);
+    .color = "c" color;
+#    std:displayln "OOO" color;
+    return color;
+};
+
 !handle_frontend_command = {!(path, data) = @;
     match data
+        $["segments", segments, led_per_s, colors] => {
+            !color_txt = "";
+            iter c $\.colors {
+                .color_txt +>= color2cmd (c $p(1, -1));
+                .color_txt +>= " ";
+            };
+            !led_per_s = int $\.led_per_s;
+            !segments  = int $\.segments;
+
+            !len_txt = $F "L{:04!i}" led_per_s * segments;
+
+            !color_slot_assign = $F "/l{:02!i}" led_per_s;
+
+            .cmd = std:str:to_bytes ~ "#" color_txt " " len_txt "; " color_slot_assign "!";
+            std:displayln ">" cmd;
+            on_error {||
+                std:displayln "ER:" @;
+                reconnect[];
+            } ~ port.send cmd;
+        }
         $["one_color", x] => {
-            !color = $\.x $p(1, -1);
-            .color = std:v:hex2rgba_f color;
-            .color = std:v:rgb2hsv color;
-            .color =
-                std:str:to_lowercase ~
-                    std:bytes:to_hex ~
-                        (byte (color.0 / 360.0) * 255.0)
-                            (byte color.1 * 255.0)
-                            (byte color.2 * 255.0);
-            .color = "c" color;
+            !color = color2cmd ~ $\.x $p(1, -1);
 
             .cmd = std:str:to_bytes ~ "#" color " L0009; +0000!";
             std:displayln ">" cmd;
@@ -72,6 +100,7 @@ while $t {
             .recv = $t;
         };
     };
+
     std:thread:sleep :ms => 100;
 };
 
