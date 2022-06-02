@@ -7,9 +7,22 @@
 
 !bta = blue:new_adapter[];
 
-#std:displayln ~ blue:list bta :s => 4;
+!list = blue:list bta :s => 4;
+std:displayln list;
 
-!addr = $b"\x98\xD3q\xF6\x11\x0E";
+!addr = $n;
+iter a list {
+    if a.name == "WRPVM" {
+        .addr = a.addr;
+        break[];
+    };
+};
+
+if is_none &> addr {
+    panic "No HC-05 Module found!";
+};
+
+#!addr = $b"\x98\xD3q\xF6\x11\x0E";
 !port = $n;# blue:spawn_port_for_address bta addr chan;
 std:displayln ~ port;
 
