@@ -7,23 +7,25 @@
 
 !bta = blue:new_adapter[];
 
-!list = blue:list bta :s => 4;
-std:displayln list;
+#!list = blue:list bta :s => 4;
+#std:displayln list;
+#
+#!addr = $n;
+#iter a list {
+#    if a.name == "WRPVM" {
+#        .addr = a.addr;
+#        break[];
+#    };
+#};
 
-!addr = $n;
-iter a list {
-    if a.name == "WRPVM" {
-        .addr = a.addr;
-        break[];
-    };
-};
+#if is_none &> addr {
+#    panic "No HC-05 Module found!";
+#};
 
-if is_none &> addr {
-    panic "No HC-05 Module found!";
-};
-
-#!addr = $b"\x98\xD3q\xF6\x11\x0E";
+!addr = $b"\x98\xD3A\xF6\x01}";
+#!addr2 = $b"\x98\xD3q\xF6\x11\x0E";
 !port = $n;# blue:spawn_port_for_address bta addr chan;
+#!port2 = $n;# blue:spawn_port_for_address bta addr chan;
 std:displayln ~ port;
 
 !reconnect = {
